@@ -42,11 +42,37 @@ function syncWorkerSelects() {
     sel.innerHTML = '<option value="">请选择…</option>' + opts;
     if (state.workers.some((w) => w.id === keep)) sel.value = keep;
   });
+  // 数据刷新后也必须按当前人员调和计划下拉（refreshAll 后旧值可能已失效）。
+  syncPlanOptions(true);
+}
+
+// 重建评估页计划下拉：只列当前人员的计划。
+// preserve=true 时尽量保留当前选择（跨人员/不存在的计划一律清空）；
+// preferredPlanId 显式指定要选中的计划（仍须属于当前人员）。返回选中的计划 id。
+function syncPlanOptions(preserve, preferredPlanId) {
   const ps = $('#budget-plan');
   const wid = $('#budget-worker').value;
-  const plans = state.plans.filter((p) => !wid || p.worker_id === wid);
+  const previous = ps.value; // 必须在重建 innerHTML 之前读取
+  const plans = BudgetSelection.plansOfWorker(state.plans, wid);
   ps.innerHTML = '<option value="">不叠加计划（仅期间累计）</option>' +
     plans.map((p) => `<option value="${p.id}">${esc(p.plan_code)}（${statusLabel(p.permit_status)}）</option>`).join('');
+  const candidate = preferredPlanId !== undefined ? preferredPlanId : (preserve ? previous : '');
+  ps.value = BudgetSelection.resolvePlanForWorker(wid, candidate, state.plans);
+  return ps.value;
+}
+
+// 切换评估人员的统一入口。无论来源是下拉 change、人员页按钮还是“评估此计划”，
+// 都先调和计划选择（跨人员计划一律清空），避免把旧人员计划带给试算/保存。
+function changeBudgetWorker(workerId, preferredPlanId) {
+  const previousPlan = $('#budget-plan').value;
+  $('#budget-worker').value = workerId || '';
+  const reconcile = BudgetSelection.reconcileOnWorkerChange(workerId, previousPlan, state.plans);
+  const nextPlan = preferredPlanId !== undefined
+    ? BudgetSelection.resolvePlanForWorker(workerId, preferredPlanId, state.plans)
+    : reconcile.planId;
+  syncPlanOptions(false, nextPlan);
+  if (reconcile.changed && previousPlan) toast(reconcile.reason);
+  return $('#budget-plan').value;
 }
 function statusLabel(s) { return state.meta?.review_statuses?.[s] || s; }
 
@@ -284,22 +310,23 @@ window.archivePlan = async (id) => {
 };
 window.assessPlan = (pid) => {
   const p = state.plans.find((x) => x.id === pid);
-  $('#budget-worker').value = p.worker_id;
-  syncWorkerSelects();
-  $('#budget-worker').value = p.worker_id;
-  $('#budget-plan').value = pid;
+  changeBudgetWorker(p.worker_id, pid); // 切到计划所属人员并选中该计划
   document.querySelector('.tab[data-tab=budgets]').click();
 };
 window.quickAssess = (wid) => {
-  $('#budget-worker').value = wid;
+  changeBudgetWorker(wid); // 从人员页进入：清空任何可能残留的他人计划
   document.querySelector('.tab[data-tab=budgets]').click();
 };
 
 // ---------- budget ----------
+// 提交前最后一道防线：任何来源拿到的 plan_id 都必须属于当前人员，否则按无计划处理。
 function budgetArgs() {
+  const workerId = $('#budget-worker').value;
+  const planId = BudgetSelection.resolvePlanForWorker(workerId, $('#budget-plan').value, state.plans);
+  if (planId !== $('#budget-plan').value) $('#budget-plan').value = planId; // 纠正 UI 残留
   return {
-    worker_id: $('#budget-worker').value,
-    plan_id: $('#budget-plan').value || null,
+    worker_id: workerId,
+    plan_id: planId || null,
     as_of_day: $('#budget-asof').value || (state.meta?.today),
   };
 }
@@ -332,7 +359,10 @@ function renderResult(r, savedId) {
     </details>`;
 }
 
-$('#budget-worker').addEventListener('change', syncWorkerSelects);
+$('#budget-worker').addEventListener('change', (ev) => {
+  // 用户手动切换人员：旧计划若不属新人员会被清空并提示。
+  changeBudgetWorker(ev.target.value);
+});
 
 $('#btn-preview').addEventListener('click', async () => {
   try {

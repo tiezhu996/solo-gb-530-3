@@ -65,7 +65,8 @@ npm test
 ```
 
 - `test/dosimetry.test.js`：周期边界、单位换算、更正链、风险带顺序、首超、五年平均的表驱动单测；
-- `test/e2e.test.js`：真实启动服务（临时数据文件），覆盖建限值→录入→重复来源拒绝→核验→更正保留原记录→计划→评估/首超/风险带→保存→越级拒绝→RPO 人工接受→审计→**杀掉进程重启后从磁盘完整回读**。
+- `test/budget-selection.test.js`：评估页人员↔计划选择调和，覆盖"选 A 计划→切 B 自动清空→切回 A 仍可用→提交参数始终自洽"；
+- `test/e2e.test.js`：真实启动服务（临时数据文件），覆盖建限值→录入→重复来源拒绝→核验→更正保留原记录→计划→评估/首超/风险带→**跨人员计划被 `cross_worker` 拒绝**→保存→越级拒绝→RPO 人工接受→审计→**杀掉进程重启后从磁盘完整回读**。
 
 ## 目录结构
 
@@ -76,7 +77,8 @@ dose-budget-app/
 │   ├── dosimetry.js   # 纯算法：周期/累计/投影/风险带/首超/五年平均
 │   ├── storage.js     # JSON 原子写入存储、唯一约束、更正事务、审计
 │   └── server.js      # HTTP API + 静态托管
-├── public/            # 零构建中文单页（index.html / app.js / styles.css）
+├── public/            # 零构建中文单页（index.html / app.js / budget-selection.js / styles.css）
+│                      #   budget-selection.js：人员↔计划选择调和（切换人员自动清空他人计划）
 ├── data/db.json       # 运行后生成
 └── test/              # node:test 单测与端到端冒烟
 ```

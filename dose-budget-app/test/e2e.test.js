@@ -61,7 +61,7 @@ async function call(method, p, body, actor = 'planner_zhang') {
   return { status: res.status, json, requestId: res.headers.get('x-request-id') };
 }
 
-let workerId, exposureId, planLowId, planHighId, assessmentId;
+let workerId, exposureId, planLowId, planHighId, assessmentId, worker2Id, worker2AssessmentId;
 
 test('健康检查与静态首页', async () => {
   const h = await fetch(baseUrl + '/healthz');
@@ -225,6 +225,37 @@ test('审计可查询且覆盖关键动作', async () => {
   assert.ok(all.json.data.every((a) => a.request_id === undefined || typeof a.request_id === 'string'));
 });
 
+test('回归：跨人员计划被拒绝（cross_worker），本人员评估可保存回读', async () => {
+  const w2 = await call('POST', '/workers', {
+    worker_code: 'W-1002', display_name: '钱工',
+    annual_limit_msv: 20, administrative_limit_msv: 12, period_start_day: '2026-01-01',
+  });
+  assert.equal(w2.status, 201);
+  worker2Id = w2.json.data.id;
+
+  // 旧缺陷：人员切到 W-1002 但计划仍带 W-1001 的 planHighId —— 试算与保存都必须拒绝
+  for (const path of ['/assessments?preview=1', '/assessments']) {
+    const r = await call('POST', path, { worker_id: worker2Id, plan_id: planHighId, as_of_day: '2026-09-01' });
+    assert.equal(r.status, 400, `${path} 应拒绝跨人员计划`);
+    assert.equal(r.json.error.code, 'cross_worker');
+  }
+
+  // 新人员不带计划（前端清空后的正常请求）：基线评估为 0，可保存回读
+  const own = await call('POST', '/assessments', { worker_id: worker2Id, plan_id: null, as_of_day: '2026-09-01' });
+  assert.equal(own.status, 201);
+  assert.equal(own.json.data.plan_id, null);
+  assert.equal(own.json.data.result.projected_dose_msv, 0);
+  assert.equal(own.json.data.result.risk_band, 'within_admin');
+  const back = await call('GET', `/assessments/${own.json.data.id}`);
+  assert.equal(back.json.data.worker_id, worker2Id);
+  worker2AssessmentId = own.json.data.id;
+
+  // 切回 W-1001 后其原计划仍可正常试算（切换不破坏同人员计划）
+  const backToA = await call('POST', '/assessments?preview=1', { worker_id: workerId, plan_id: planHighId, as_of_day: '2026-09-01' });
+  assert.equal(backToA.status, 200);
+  assert.equal(backToA.json.data.projected_dose_msv, 24);
+});
+
 test('乐观锁：版本冲突返回 409', async () => {
   const r = await call('PUT', `/workers/${workerId}`, {
     version: 1, display_name: '王工（更新行政值）', administrative_limit_msv: 10,
@@ -244,8 +275,9 @@ test('重启进程后数据完整回读（持久化）', async () => {
   await waitReady(serverProc);
 
   const workers = await call('GET', '/workers');
-  assert.equal(workers.json.data.length, 1);
-  assert.equal(workers.json.data[0].administrative_limit_msv, 10);
+  assert.equal(workers.json.data.length, 2, '回归新增的第二位人员也应持久化');
+  const w1 = workers.json.data.find((w) => w.id === workerId);
+  assert.equal(w1.administrative_limit_msv, 10);
 
   const exposures = await call('GET', `/exposures?worker_id=${workerId}`);
   assert.equal(exposures.json.data.length, 3, '原记录 + 冲销 + 替代');
@@ -255,4 +287,10 @@ test('重启进程后数据完整回读（持久化）', async () => {
   const got = await call('GET', `/assessments/${assessmentId}`);
   assert.equal(got.json.data.status, 'planning_accepted');
   assert.equal(got.json.data.result.risk_band, 'within_admin');
+
+  // 第二位人员的基线评估同样可回读，且其 plan_id 为 null（跨人员计划未被带入保存）
+  const got2 = await call('GET', `/assessments/${worker2AssessmentId}`);
+  assert.equal(got2.json.data.worker_id, worker2Id);
+  assert.equal(got2.json.data.plan_id, null);
+  assert.equal(got2.json.data.result.projected_dose_msv, 0);
 });
