@@ -1,0 +1,26 @@
+<ng-container *ngIf="auth.authenticated(); else guest">
+  <div class="shell">
+    <aside class="rail">
+      <a class="brand" routerLink="/workers" aria-label="ALARA Ledger home">
+        <span class="brand-mark">AL</span>
+        <span><strong>ALARA LEDGER</strong><small>DOSE PLANNING</small></span>
+      </a>
+      <nav aria-label="Planning sections">
+        <a routerLink="/workers" routerLinkActive="active"><span class="nav-code">01</span>Workers</a>
+        <a routerLink="/plans" routerLinkActive="active"><span class="nav-code">02</span>Plans</a>
+        <a routerLink="/exposures" routerLinkActive="active"><span class="nav-code">03</span>Exposures</a>
+        <a routerLink="/budgets" routerLinkActive="active"><span class="nav-code">04</span>Budgets</a>
+        <a *ngIf="auth.canReview()" routerLink="/audit" routerLinkActive="active"><span class="nav-code">05</span>RPO Audit</a>
+      </nav>
+      <div class="rail-boundary"><span>OFFLINE</span><p>No dosimeter or permit-control connection</p></div>
+      <div class="rail-footer">
+        <span class="role-dot"></span>
+        <div><strong>{{ auth.user()?.username }}</strong><small>{{ auth.user()?.role }}</small></div>
+        <button mat-button [matMenuTriggerFor]="accountMenu" aria-label="Account menu">•••</button>
+        <mat-menu #accountMenu="matMenu"><button mat-menu-item (click)="auth.logout()">Sign out</button></mat-menu>
+      </div>
+    </aside>
+    <main id="main-content"><router-outlet /></main>
+  </div>
+</ng-container>
+<ng-template #guest><router-outlet /></ng-template>

@@ -1,0 +1,29 @@
+:host { display: block; min-height: 100vh; }
+.shell { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+.rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; color: #f2f0e8; background: #222d2a; border-right: 1px solid #111815; }
+.brand { min-height: 90px; display: flex; align-items: center; gap: 12px; padding: 0 20px; color: inherit; text-decoration: none; border-bottom: 1px solid #45514d; }
+.brand-mark { display: grid; place-items: center; width: 38px; height: 38px; background: #d79a22; color: #202925; font-family: Georgia, serif; font-weight: 800; }
+.brand strong, .brand small, .rail-footer strong, .rail-footer small { display: block; }
+.brand strong { font-size: 14px; }
+.brand small { margin-top: 3px; color: #bfc8c2; font-size: 9px; }
+nav { display: grid; gap: 4px; padding: 24px 12px; }
+nav a { min-height: 44px; display: flex; align-items: center; gap: 14px; padding: 0 12px; color: #cbd2cd; border-radius: 3px; text-decoration: none; font-size: 14px; font-weight: 700; }
+nav a:hover { color: #f5f3eb; background: #313e3a; }
+nav a.active { color: #202925; background: #f1f0e8; }
+.nav-code { font-size: 9px; font-variant-numeric: tabular-nums; opacity: .68; }
+.rail-boundary { margin: auto 14px 16px; padding: 12px; border: 1px solid #796625; background: #3c3926; }
+.rail-boundary span { color: #e7b94c; font-size: 9px; font-weight: 900; }
+.rail-boundary p { margin: 5px 0 0; color: #e2ddc9; font-size: 10px; line-height: 1.4; }
+.rail-footer { display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 10px; padding: 17px 14px; border-top: 1px solid #45514d; }
+.rail-footer small { margin-top: 2px; color: #bfc8c2; font-size: 9px; text-transform: uppercase; }
+.rail-footer button { min-width: 36px; color: #f2f0e8; }
+.role-dot { width: 8px; height: 8px; border-radius: 50%; background: #d79a22; }
+main { min-width: 0; background: #f2f1ea; }
+@media (max-width: 840px) {
+  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .rail { z-index: 20; width: 100%; height: auto; display: grid; grid-template-columns: auto 1fr auto; align-items: center; }
+  .brand { min-height: 62px; padding: 0 12px; border-bottom: 0; }
+  .brand small, .rail-footer div, .role-dot, .rail-boundary { display: none; }
+  nav { display: flex; padding: 7px; overflow-x: auto; } nav a { min-width: max-content; padding: 0 9px; }
+  .nav-code { display: none; } .rail-footer { margin: 0; padding: 6px; border: 0; grid-template-columns: auto; }
+}

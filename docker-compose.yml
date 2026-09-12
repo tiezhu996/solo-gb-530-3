@@ -1,0 +1,73 @@
+name: radiation-dose-budget-control
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-radiation-dose-budget-control}-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dose_budget}
+      POSTGRES_USER: ${POSTGRES_USER:-doseplanner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dose_local_530}
+    ports:
+      - "${POSTGRES_PORT:-57530}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-doseplanner} -d ${POSTGRES_DB:-dose_budget}"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-radiation-dose-budget-control}-backend
+    environment:
+      PORT: "8080"
+      DB_DRIVER: postgres
+      DB_DSN: ${DB_DSN:-host=postgres user=doseplanner password=dose_local_530 dbname=dose_budget port=5432 sslmode=disable TimeZone=UTC}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-true}
+      JWT_SECRET: ${JWT_SECRET:-local-radiation-dose-planning-secret-530}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-480}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:18530}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-240}
+      DEFAULT_PERIOD_DAYS: ${DEFAULT_PERIOD_DAYS:-365}
+      DEFAULT_ANNUAL_LIMIT_MSV: ${DEFAULT_ANNUAL_LIMIT_MSV:-20}
+      DEFAULT_ADMIN_LIMIT_MSV: ${DEFAULT_ADMIN_LIMIT_MSV:-12}
+      NEAR_LEGAL_RATIO: ${NEAR_LEGAL_RATIO:-0.90}
+      THRESHOLD_VERSION: ${THRESHOLD_VERSION:-ALARA-2026.1}
+    ports:
+      - "${BACKEND_PORT:-19530}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-radiation-dose-budget-control}-frontend
+    ports:
+      - "${FRONTEND_PORT:-18530}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: ${COMPOSE_PROJECT_NAME:-radiation-dose-budget-control}-postgres-data
