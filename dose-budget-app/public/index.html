@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>辐射作业个人剂量预算</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">☢ 辐射作业个人剂量预算 <span class="brand-sub">离线 ALARA 规划工具</span></div>
+    <div class="actor-box">
+      操作者：
+      <select id="actor">
+        <option value="planner_zhang">张计划员（planner）</option>
+        <option value="rpo_li">李 RPO 复核员</option>
+        <option value="rpo_wang">王 RPO 复核员</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="safety-banner">
+    本系统仅用于 ALARA 规划与<strong>人工复核提示</strong>，不是剂量计、医疗系统或作业许可控制器；
+    <strong>不会自动批准任何作业</strong>。所有结论不能替代法规、现场许可、辐射防护负责人（RPO）或医疗意见。
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="workers">① 人员限值</button>
+    <button class="tab" data-tab="exposures">② 暴露记录</button>
+    <button class="tab" data-tab="plans">③ 作业计划</button>
+    <button class="tab" data-tab="budgets">④ 剂量预算评估</button>
+    <button class="tab" data-tab="audit">⑤ 审计</button>
+  </nav>
+
+  <main>
+    <!-- 人员限值 -->
+    <section id="tab-workers" class="tabpanel active">
+      <div class="grid2">
+        <form id="form-worker" class="card">
+          <h3>维护人员限值概况</h3>
+          <p class="hint">只保存规划所需最小信息（编号、授权级别、限值、统计周期），不保存任何病历/诊断信息。</p>
+          <label>人员编号 <input name="worker_code" required placeholder="如 W-1001" /></label>
+          <label>显示名 <input name="display_name" required placeholder="如 王工" /></label>
+          <label>授权级别
+            <select name="authorization_level">
+              <option value="standard">一般授权</option>
+              <option value="restricted">限制授权</option>
+              <option value="special">特殊作业授权</option>
+            </select>
+          </label>
+          <div class="row">
+            <label>法规规划年限值 (mSv) <input name="annual_limit_msv" type="number" step="0.01" min="0" value="20" required /></label>
+            <label>行政控制值 (mSv) <input name="administrative_limit_msv" type="number" step="0.01" min="0" value="12" required /></label>
+          </div>
+          <div class="row">
+            <label>周期锚点（起） <input name="period_start_day" type="date" required /></label>
+            <label>周期天数 <input name="period_days" type="number" step="1" min="1" value="365" required /></label>
+          </div>
+          <button type="submit" class="btn primary" id="worker-submit">新增人员</button>
+          <p class="hint">默认年规划限值 20 mSv（GB 18871 连续 5 年平均约束），行政控制值 12 mSv 由本单位 ALARA 计划设定，均可调整。</p>
+        </form>
+        <div class="card">
+          <h3>人员列表</h3>
+          <div id="workers-list" class="list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 暴露记录 -->
+    <section id="tab-exposures" class="tabpanel">
+      <div class="grid2">
+        <form id="form-exposure" class="card">
+          <h3>录入离线暴露记录</h3>
+          <p class="hint">同一来源（source_ref）只能保存一次；录入后为“待核验”，核验通过才计入周期累计。更正不会覆盖原值，将保留冲销/替代链。</p>
+          <label>人员 <select name="worker_id" required data-worker-select></select></label>
+          <label>来源凭证号（唯一） <input name="source_ref" required placeholder="如 DOS-2026-0007" /></label>
+          <div class="row">
+            <label>发生日期 <input name="occurred_at" type="date" required /></label>
+            <label>剂量 (mSv) <input name="dose_msv" type="number" step="0.001" min="0" required /></label>
+          </div>
+          <label>备注 <input name="note" placeholder="数据来源/读数说明（可选）" /></label>
+          <button type="submit" class="btn primary">录入（待核验）</button>
+        </form>
+        <div class="card">
+          <h3>暴露台账（含更正链）</h3>
+          <div id="exposures-list" class="list tall"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 作业计划 -->
+    <section id="tab-plans" class="tabpanel">
+      <div class="grid2">
+        <form id="form-plan" class="card">
+          <h3>维护作业计划假设</h3>
+          <p class="hint">统一单位：剂量率 mSv/h、时长 min。计划增量 = 剂量率 × 分钟 ÷ 60。控制措施每行一条，用分号或换行分隔。</p>
+          <label>计划编号 <input name="plan_code" required placeholder="如 PLAN-A" /></label>
+          <label>人员 <select name="worker_id" required data-worker-select></select></label>
+          <div class="row">
+            <label>作业区域 <input name="work_area" placeholder="如 反应堆厂房 0m 层" /></label>
+            <label>作业类别 <input name="task_category" placeholder="如 阀门检修" /></label>
+          </div>
+          <div class="row">
+            <label>预计剂量率 (mSv/h) <input name="estimated_rate_msvh" type="number" step="0.001" min="0" value="0.30" required /></label>
+            <label>计划时长 (min) <input name="planned_minutes" type="number" step="1" min="0" value="60" required /></label>
+          </div>
+          <label>计划执行日期（可选） <input name="planned_on_day" type="date" /></label>
+          <label>控制措施 <textarea name="controls" rows="3" placeholder="铅屏防护；缩短停留时间；远距离工具"></textarea></label>
+          <button type="submit" class="btn primary">新增计划草案</button>
+        </form>
+        <div class="card">
+          <h3>计划列表（人工状态机）</h3>
+          <div id="plans-list" class="list tall"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 评估 -->
+    <section id="tab-budgets" class="tabpanel">
+      <div class="card">
+        <h3>运行剂量预算评估</h3>
+        <div class="row">
+          <label>人员 <select id="budget-worker" data-worker-select></select></label>
+          <label>叠加计划（可选） <select id="budget-plan"><option value="">不叠加计划（仅期间累计）</option></select></label>
+          <label>截至日期 <input id="budget-asof" type="date" /></label>
+        </div>
+        <div class="row">
+          <button id="btn-preview" class="btn">试算（不落库）</button>
+          <button id="btn-save" class="btn primary">计算并保存评估</button>
+          <button id="btn-compare" class="btn">该人员全部计划情景比较</button>
+        </div>
+      </div>
+      <div id="budget-result" class="card hidden"></div>
+      <div id="compare-result" class="card hidden"></div>
+      <div class="card">
+        <h3>已保存评估（不可变，可回读）</h3>
+        <div id="assessments-list" class="list tall"></div>
+      </div>
+    </section>
+
+    <!-- 审计 -->
+    <section id="tab-audit" class="tabpanel">
+      <div class="card">
+        <h3>操作审计</h3>
+        <div class="row">
+          <label>过滤实体
+            <select id="audit-entity">
+              <option value="">全部</option>
+              <option value="worker">人员</option>
+              <option value="exposure">暴露</option>
+              <option value="plan">计划</option>
+              <option value="assessment">评估</option>
+            </select>
+          </label>
+          <button id="btn-audit-refresh" class="btn">刷新</button>
+        </div>
+        <div id="audit-list" class="list tall"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
