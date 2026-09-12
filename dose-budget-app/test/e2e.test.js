@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const os = require('node:os');
 
 const ROOT = path.join(__dirname, '..');
@@ -49,7 +50,11 @@ before(async () => {
   serverProc = await startServer();
   await waitReady(serverProc);
 });
-after(() => { try { serverProc.kill('SIGTERM'); } catch { /* noop */ } });
+after(async () => {
+  try { serverProc.kill('SIGTERM'); } catch { /* noop */ }
+  await new Promise((r) => setTimeout(r, 300));
+  await fsp.rm(tmpDir, { recursive: true, force: true }); // 结束移除临时文件
+});
 
 async function call(method, p, body, actor = 'planner_zhang') {
   const res = await fetch(baseUrl + '/api/v1' + p, {

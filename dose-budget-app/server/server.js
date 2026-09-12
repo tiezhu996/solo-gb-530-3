@@ -197,7 +197,7 @@ function computeAssessment(storage, body) {
   }
   const exposures = storage.listExposures({ worker_id: worker.id });
   try {
-    return dos.assess({ worker, plan, exposures, as_of_day: body.as_of_day || todayDay() });
+    return dos.assess({ worker, plan, exposures, asOfDay: body.as_of_day || todayDay() });
   } catch (err) {
     if (err instanceof dos.DosimetryError) throw new HttpError(422, err.code, err.message);
     throw err;

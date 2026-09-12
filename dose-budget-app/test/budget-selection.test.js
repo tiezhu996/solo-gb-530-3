@@ -73,3 +73,53 @@ test('完整切换序列：A选计划→切B清空→切回A可选原计划→�
   const hostile = 'pB1';
   assert.equal(S.resolvePlanForWorker(worker, hostile, plans), '');
 });
+
+test('切回原人员后原计划重新可选（旧缺陷的直接回归）', () => {
+  // 1) A 下选 pA1
+  let worker = 'wA';
+  const first = S.reconcileOnWorkerChange(worker, '', plans);
+  assert.equal(first.planId, '');
+  const selected = S.resolvePlanForWorker(worker, 'pA1', plans);
+  assert.equal(selected, 'pA1');
+
+  // 2) 切 B：pA1 被清空并报告 changed
+  worker = 'wB';
+  const onB = S.reconcileOnWorkerChange(worker, 'pA1', plans);
+  assert.equal(onB.planId, '');
+  assert.equal(onB.changed, true);
+
+  // 3) 切回 A：同人员选择被恢复，pA1 再次合法可选
+  worker = 'wA';
+  const back = S.reconcileOnWorkerChange(worker, '', plans);
+  assert.equal(back.changed, false);
+  assert.equal(S.resolvePlanForWorker(worker, 'pA1', plans), 'pA1');
+  assert.equal(S.resolvePlanForWorker(worker, 'pA2', plans), 'pA2');
+  assert.deepEqual(S.plansOfWorker(plans, worker).map((p) => p.id), ['pA1', 'pA2']);
+});
+
+test('数据刷新后调和：计划仍存在则保留，已删除/不再属于该人员则清空', () => {
+  // refreshAll 后同人员计划仍在 → preserve 路径保留
+  assert.equal(S.resolvePlanForWorker('wA', 'pA1', plans), 'pA1');
+
+  // 计划被删除（plans 列表里不存在）→ 清空，而不是把失效 id 提交出去
+  const afterDelete = plans.filter((p) => p.id !== 'pA1');
+  assert.equal(S.resolvePlanForWorker('wA', 'pA1', afterDelete), '');
+
+  // 刷新拿到的新计划集中计划改挂给了别的人员 → 清空
+  const reAssigned = plans.map((p) => p.id === 'pA1' ? { ...p, worker_id: 'wB' } : p);
+  assert.equal(S.resolvePlanForWorker('wA', 'pA1', reAssigned), '');
+  assert.equal(S.resolvePlanForWorker('wB', 'pA1', reAssigned), 'pA1'); // 在新人员下合法
+
+  // 空人员/空计划集合不崩溃
+  assert.equal(S.resolvePlanForWorker('', 'pA1', plans), '');
+  assert.equal(S.resolvePlanForWorker('wA', 'pA1', []), '');
+});
+
+test('assessPlan 路径：切到计划所属人员并显式选择该计划', () => {
+  // 模拟 changeBudgetWorker(workerOfPlan, planId) 使用的解析：
+  // 任意来源（含从无计划人员页跳转）都能正确选中，且不属于目标人员时被拒。
+  assert.equal(S.resolvePlanForWorker('wA', 'pA1', plans), 'pA1');
+  assert.equal(S.resolvePlanForWorker('wB', 'pA1', plans), ''); // 计划与目标人员不符 → 不选
+  assert.equal(S.resolvePlanForWorker('wB', 'pB1', plans), 'pB1');
+});
+

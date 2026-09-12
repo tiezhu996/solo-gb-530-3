@@ -51,11 +51,19 @@ class Storage {
   }
 
   // 所有变更串行化，避免并发请求交叉写入。
+  // 事务语义：业务回调或落盘任一步失败，都把内存回滚到事务前快照并向上抛错，
+  // 保证内存与磁盘一致——临时写入失败后，重新打开（回读）得到的仍是上一次成功提交的数据。
   mutate(fn) {
     const run = this._writeChain.then(async () => {
-      const result = await fn(this.db);
-      await this._persist();
-      return result;
+      const snapshot = clone(this.db);
+      try {
+        const result = await fn(this.db);
+        await this._persist();
+        return result;
+      } catch (err) {
+        this.db = snapshot;
+        throw err;
+      }
     });
     // 保持链条不断（即便本次失败也允许后续写）。
     this._writeChain = run.then(() => undefined, () => undefined);
@@ -65,8 +73,14 @@ class Storage {
   async _persist() {
     const tmp = `${this.filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     const data = JSON.stringify(this.db, null, 2);
-    await fsp.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-    await fsp.rename(tmp, this.filePath);
+    try {
+      await fsp.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
+      await fsp.rename(tmp, this.filePath);
+    } catch (err) {
+      // 失败时清掉残留临时文件，绝不把半成品当作正式数据（rename 前 tmp 与正式文件相互独立）。
+      await fsp.unlink(tmp).catch(() => undefined);
+      throw err;
+    }
   }
 
   // ---------- 只读 ----------
