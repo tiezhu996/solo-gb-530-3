@@ -1,7 +1,11 @@
 'use strict';
 
-// 文件型存储：全部数据保存在一个 JSON 文件中，原子写入（写临时文件 + rename）。
-// 单进程内用串行写队列保证一致性；写失败不会损坏已有数据文件。
+// 文件型存储：全部数据保存在一个 JSON 文件中。
+// 一致性保证（含多进程共享同一数据文件）：
+//   - 单进程内用写队列串行化；
+//   - 跨进程用排他文件锁把每个“读-改-写”事务串行化（见 lock.js）；
+//   - 事务内先从磁盘重读最新状态，再应用变更，最后 fsync + 原子 rename；
+//   - 业务失败或落盘失败都回滚内存，旧数据文件不受影响。
 // 数据模型刻意最小化：不存任何医疗/诊断信息。
 
 const fs = require('node:fs');
@@ -9,6 +13,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { QUALITY_FLAGS, ENTRY_TYPES, REVIEW_STATUSES, DEFAULTS } = require('./dosimetry');
+const { FileLock } = require('./lock');
 
 class StorageError extends Error {
   constructor(code, message, statusCode = 400) {
@@ -30,39 +35,50 @@ const EMPTY_DB = () => ({
 });
 
 class Storage {
-  constructor(filePath) {
+  constructor(filePath, lockOptions) {
     this.filePath = filePath;
+    this.lockPath = `${filePath}.lock`;
+    this.lockOptions = lockOptions;
     this._writeChain = Promise.resolve();
     this.db = EMPTY_DB();
   }
 
-  static async open(filePath) {
-    const s = new Storage(filePath);
+  static async open(filePath, lockOptions) {
+    const s = new Storage(filePath, lockOptions);
     await fsp.mkdir(path.dirname(path.resolve(filePath)), { recursive: true });
-    try {
-      const raw = await fsp.readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw);
-      s.db = { ...EMPTY_DB(), ...parsed };
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-      await s._persist(); // 首次启动落盘
-    }
+    await s.reload(); // 不在此处建空文件，避免两个进程首次启动时互相覆盖
     return s;
   }
 
-  // 所有变更串行化，避免并发请求交叉写入。
-  // 事务语义：业务回调或落盘任一步失败，都把内存回滚到事务前快照并向上抛错，
-  // 保证内存与磁盘一致——临时写入失败后，重新打开（回读）得到的仍是上一次成功提交的数据。
+  // 从磁盘重读最新数据（读路径调用，无需持锁；原子 rename 保证不会读到半截 JSON）。
+  async reload() {
+    try {
+      const raw = await fsp.readFile(this.filePath, 'utf8');
+      this.db = { ...EMPTY_DB(), ...JSON.parse(raw) };
+    } catch (err) {
+      if (err.code === 'ENOENT') { this.db = EMPTY_DB(); return this.db; }
+      if (err instanceof SyntaxError) throw new StorageError('corrupt_data_file', `数据文件损坏，拒绝用内存覆盖磁盘：${err.message}`, 500);
+      throw err;
+    }
+    return this.db;
+  }
+
+  // 跨进程安全事务：加锁 → 重读磁盘 → 变更 → 原子提交 → 释放；任一步失败回滚。
   mutate(fn) {
     const run = this._writeChain.then(async () => {
+      const lock = new FileLock(this.lockPath, this.lockOptions);
+      const { release } = await lock.acquire(); // 获取失败抛 lock_timeout，旧数据不变
       const snapshot = clone(this.db);
       try {
+        await this.reload();                 // 关键：以锁内磁盘最新状态为准
         const result = await fn(this.db);
         await this._persist();
         return result;
       } catch (err) {
-        this.db = snapshot;
+        this.db = snapshot;                  // 回滚内存，避免污染本进程后续读
         throw err;
+      } finally {
+        await release();
       }
     });
     // 保持链条不断（即便本次失败也允许后续写）。
@@ -73,12 +89,17 @@ class Storage {
   async _persist() {
     const tmp = `${this.filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     const data = JSON.stringify(this.db, null, 2);
+    let fh;
     try {
-      await fsp.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600 });
-      await fsp.rename(tmp, this.filePath);
+      fh = await fsp.open(tmp, 'w', 0o600);
+      await fh.writeFile(data, { encoding: 'utf8' });
+      await fh.sync(); // 提交前强制落盘，降低崩溃/断电导致空文件的概率
+      await fh.close();
+      fh = undefined;
+      await fsp.rename(tmp, this.filePath); // 原子替换：读者只能看到旧版或新版
     } catch (err) {
-      // 失败时清掉残留临时文件，绝不把半成品当作正式数据（rename 前 tmp 与正式文件相互独立）。
-      await fsp.unlink(tmp).catch(() => undefined);
+      if (fh) await fh.close().catch(() => undefined);
+      await fsp.unlink(tmp).catch(() => undefined); // 清掉半成品临时文件
       throw err;
     }
   }

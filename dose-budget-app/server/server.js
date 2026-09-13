@@ -59,6 +59,14 @@ async function handle(req, res, requestId, storage) {
 
   if (!p.startsWith('/api/v1/')) return serveStatic(p, res);
 
+  // 多进程共享同一数据文件：读路径先从磁盘重读，保证看到其他进程已提交的写入。
+  // 写路径的 mutate 会在锁内再次重读，这里的无锁重读不影响正确性。
+  try {
+    await storage.reload();
+  } catch (err) {
+    if (err.statusCode === 500) throw err; // 数据文件损坏：明确报错，不用内存覆盖
+  }
+
   const seg = p.split('/').slice(3); // /api/v1/<...>
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readJson(req) : {};
   const q = url.searchParams;
@@ -322,7 +330,11 @@ function serveStatic(urlPath, res) {
 function todayDay() { return new Date().toISOString().slice(0, 10); }
 
 async function main() {
-  const storage = await Storage.open(DATA_FILE);
+  const lockOptions = {
+    timeoutMs: Number(process.env.LOCK_TIMEOUT_MS || 10_000),
+    staleMs: Number(process.env.LOCK_STALE_MS || 15_000),
+  };
+  const storage = await Storage.open(DATA_FILE, lockOptions);
   const server = createServer(storage);
   server.listen(PORT, HOST, () => {
     const actualPort = server.address().port;

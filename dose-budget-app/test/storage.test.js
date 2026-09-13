@@ -10,6 +10,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { Storage } = require('../server/storage');
+const { FileLock } = require('../server/lock');
 
 let dir;
 let dbPath;
@@ -79,17 +80,17 @@ test('临时文件写入失败：内存回滚、磁盘旧数据可回读、无�
   await s.createWorker(workerInput('W-OLD'), 'tester');
   assert.equal(s.listWorkers().length, 1);
 
-  // 注入一次性 EIO：模拟临时文件写入失败（rename 尚未发生）
-  const origWrite = fsp.writeFile;
+  // 注入一次性 EIO：模拟临时文件写入失败（锁文件 .lock 不受影响，仅 .tmp 失败）
+  const origOpen = fsp.open;
   let failed = false;
-  fsp.writeFile = async function patchedWrite(p, ...rest) {
+  fsp.open = async function patchedOpen(p, ...rest) {
     if (String(p).includes('.tmp-') && !failed) {
       failed = true;
       const e = new Error('simulated EIO');
       e.code = 'EIO';
       throw e;
     }
-    return origWrite.call(this, p, ...rest);
+    return origOpen.call(this, p, ...rest);
   };
   try {
     await assert.rejects(
@@ -97,7 +98,7 @@ test('临时文件写入失败：内存回滚、磁盘旧数据可回读、无�
       (e) => e.code === 'EIO',
     );
   } finally {
-    fsp.writeFile = origWrite;
+    fsp.open = origOpen;
   }
   assert.equal(failed, true);
 
@@ -114,9 +115,10 @@ test('临时文件写入失败：内存回滚、磁盘旧数据可回读、无�
   const codes = s2.listWorkers().map((w) => w.worker_code).sort();
   assert.deepEqual(codes, ['W-AFTER', 'W-OLD']);
 
-  // 无 .tmp 残留
-  const leftovers = (await fsp.readdir(dir)).filter((f) => f.includes('.tmp-'));
-  assert.deepEqual(leftovers, []);
+  // 失败事务已释放锁、清理临时文件：无 .tmp/.lock 残留
+  const files = await fsp.readdir(dir);
+  assert.deepEqual(files.filter((f) => f.includes('.tmp-')), []);
+  assert.deepEqual(files.filter((f) => f.endsWith('.lock')), [], '失败事务必须释放锁');
 });
 
 test('rename 失败（模拟磁盘满后目录操作失败）：内存回滚且可恢复', async () => {
@@ -163,16 +165,18 @@ test('更正事务在落盘失败时整体回滚，不留半条 reversal/replace
   const e = await s.createExposure({ worker_id: w.id, source_ref: 'CORR-1', occurred_at: '2026-02-01', dose_msv: 5 }, 'tester');
   await s.verifyExposure(e.id, { reviewer: 'rpo' }, 'rpo');
 
-  const origWrite = fsp.writeFile;
-  fsp.writeFile = async (p, ...rest) => {
-    const err = new Error('disk down'); err.code = 'EIO';
-    if (String(p).includes('.tmp-')) throw err;
-    return origWrite.call(this, p, ...rest);
+  const origOpen = fsp.open;
+  fsp.open = async (p, ...rest) => {
+    if (String(p).includes('.tmp-')) {
+      const err = new Error('disk down'); err.code = 'EIO';
+      throw err;
+    }
+    return origOpen.call(this, p, ...rest);
   };
   try {
     await assert.rejects(() => s.correctExposure(e.id, { dose_msv: 4, reviewer: 'rpo' }, 'rpo'), /disk down/);
   } finally {
-    fsp.writeFile = origWrite;
+    fsp.open = origOpen;
   }
   const rows = s.listExposures();
   assert.equal(rows.length, 1, '失败的更正不得产生 reversal/replacement');
@@ -225,4 +229,99 @@ test('审计只增：每次成功/失败关键操作都追加记录，且存储�
   const view = s.listAudit();
   view.length = 0;
   assert.ok(s.listAudit().length > 0);
+});
+
+// ---------- 多进程共享场景：两个 opener 操作同一文件 ----------
+
+test('双 opener：一方落盘失败，另一方与磁盘旧数据都不被破坏，恢复后写入编号不重', async () => {
+  const a = await Storage.open(dbPath, { timeoutMs: 5000 });
+  await a.createWorker(workerInput('BASE-1'), 'A');
+  const b = await Storage.open(dbPath, { timeoutMs: 5000 }); // 第二个打开器（模拟第二个进程）
+
+  // A 注入临时文件写入失败：其事务整体回滚
+  const origOpen = fsp.open;
+  fsp.open = async function (p, ...rest) {
+    if (String(p).includes('.tmp-')) { const e = new Error('A disk down'); e.code = 'EIO'; throw e; }
+    return origOpen.call(this, p, ...rest);
+  };
+  try {
+    await assert.rejects(() => a.createWorker(workerInput('A-FAIL'), 'A'), /A disk down/);
+  } finally {
+    fsp.open = origOpen;
+  }
+
+  // A 内存回滚：仍只有 BASE-1
+  assert.deepEqual(a.listWorkers().map((w) => w.worker_code), ['BASE-1']);
+
+  // B 不受影响，可正常提交（锁内重读磁盘）
+  const byB = await b.createWorker(workerInput('B-OK'), 'B');
+  assert.equal(byB.id, 'wkr_00002', '失败事务不得占用编号');
+
+  // A 恢复后也能继续提交，编号接着 B 的走，不重复
+  const byA = await a.createWorker(workerInput('A-OK'), 'A');
+  assert.equal(byA.id, 'wkr_00003');
+
+  // 从磁盘重新打开（第三个打开器）：BASE-1 / B-OK / A-OK 全在，无 A-FAIL
+  const c = await Storage.open(dbPath, { timeoutMs: 5000 });
+  assert.deepEqual(c.listWorkers().map((w) => w.worker_code).sort(), ['A-OK', 'BASE-1', 'B-OK'].sort());
+  const ids = new Set(c.listWorkers().map((w) => w.id));
+  assert.equal(ids.size, 3);
+});
+
+test('双 opener 交错连续写入：经文件锁串行化，全部保留且编号唯一连续', async () => {
+  const a = await Storage.open(dbPath, { timeoutMs: 5000 });
+  const b = await Storage.open(dbPath, { timeoutMs: 5000 });
+  const jobs = [];
+  for (let i = 0; i < 20; i++) {
+    jobs.push(a.createWorker(workerInput(`X-A-${String(i).padStart(2, '0')}`), 'A'));
+    jobs.push(b.createWorker(workerInput(`X-B-${String(i).padStart(2, '0')}`), 'B'));
+  }
+  const rs = await Promise.all(jobs);
+  assert.equal(rs.length, 40);
+  assert.equal(new Set(rs.map((r) => r.id)).size, 40, '编号不得重复');
+  const nums = rs.map((r) => Number(r.id.split('_')[1])).sort((x, y) => x - y);
+  assert.deepEqual(nums, Array.from({ length: 40 }, (_, i) => i + 1));
+  const c = await Storage.open(dbPath);
+  assert.equal(c.listWorkers().length, 40);
+});
+
+test('锁等待：锁被占满超过超时时间返回 lock_timeout(503)，不覆盖旧数据；释放后可继续', async () => {
+  const s = await Storage.open(dbPath, { timeoutMs: 300, staleMs: 60_000 });
+  await s.createWorker(workerInput('LOCK-BASE'), 'A');
+
+  const blocker = new FileLock(`${dbPath}.lock`, { timeoutMs: 50, staleMs: 60_000 });
+  const held = await blocker.acquire(); // 模拟另一个进程长时间持锁
+  try {
+    const t0 = Date.now();
+    await assert.rejects(
+      () => s.createWorker(workerInput('SHOULD-WAIT'), 'A'),
+      (e) => e.code === 'lock_timeout' && e.statusCode === 503,
+    );
+    assert.ok(Date.now() - t0 >= 250, '应当确实等待到超时，而不是立即失败');
+  } finally {
+    await held.release();
+  }
+
+  // 超时写入未生效，旧数据完好；锁释放后新写入成功
+  assert.deepEqual(s.listWorkers().map((w) => w.worker_code), ['LOCK-BASE']);
+  const ok = await s.createWorker(workerInput('AFTER-LOCK'), 'A');
+  assert.equal(ok.worker_code, 'AFTER-LOCK');
+  const again = await Storage.open(dbPath);
+  assert.deepEqual(again.listWorkers().map((w) => w.worker_code).sort(), ['AFTER-LOCK', 'LOCK-BASE']);
+});
+
+test('陈旧锁：持锁进程在本机已不存在且锁超龄，新事务可接管并正常提交', async () => {
+  const s = await Storage.open(dbPath, { timeoutMs: 2000, staleMs: 200 });
+  await s.createWorker(workerInput('STALE-BASE'), 'A');
+
+  // 伪造一个属于“不存在进程”的陈旧锁文件（mtime 设为很久以前）
+  const lockPath = `${dbPath}.lock`;
+  await fsp.writeFile(lockPath, JSON.stringify({ pid: 999999, hostname: os.hostname(), token: 'dead' }));
+  const old = new Date(Date.now() - 60_000);
+  await fsp.utimes(lockPath, old, old);
+
+  const ok = await s.createWorker(workerInput('STALE-AFTER'), 'A');
+  assert.equal(ok.worker_code, 'STALE-AFTER');
+  // 提交后锁已释放（陈旧锁接管者负责释放自己的锁）
+  assert.deepEqual((await fsp.readdir(dir)).filter((f) => f.endsWith('.lock')), []);
 });
